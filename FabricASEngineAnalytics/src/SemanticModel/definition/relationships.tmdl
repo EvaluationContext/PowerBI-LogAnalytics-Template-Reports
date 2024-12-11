@@ -17,3 +17,9 @@ relationship 5bcaaede-8917-fab3-dc6d-b478801fec10
 	fromColumn: 'Progress Report'.XmlaRequestId
 	toColumn: ExecutionMetrics.XmlaRequestId
 
+relationship AutoDetected_8e3900fd-9bc4-4921-b151-a1ea1bc212f7
+	crossFilteringBehavior: bothDirections
+	fromCardinality: one
+	fromColumn: ErrorText.XmlaRequestId
+	toColumn: ExecutionMetrics.XmlaRequestId
+

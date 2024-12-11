@@ -1,6 +1,182 @@
 table ExecutionMetrics
 	lineageTag: 388b868c-ddfb-49a5-bcd6-8cc2a18f5aa1
 
+	refreshPolicy
+		policyType: basic
+		rollingWindowGranularity: month
+		rollingWindowPeriods: 2
+		incrementalGranularity: day
+		incrementalPeriods: 2
+		incrementalPeriodsOffset: -1
+		sourceExpression = ```
+			let
+			RangeStartTime = DateTime.ToText(RangeStart,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+			RangeEndTime = DateTime.ToText(RangeEnd,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+			Source = AzureDataExplorer.Contents(
+				#"Azure Log Analytics Path"
+				, #"Azure Log Analytics Workspace Name"
+				,"
+				set notruncation;
+				set ClientRequestIdPrefix='BYOLA ExecutionMetrics';
+				let FileTimeToDateTime = (fileTime: long) { unixtime_nanoseconds_todatetime((fileTime - 116444736000000000) * 100) };
+				let RangeStartTime = todatetime('" & RangeStartTime & "');
+				let RangeEndTime = todatetime('" & RangeEndTime & "');
+				let dbid = '"& _ArtifactId &"';
+				let wkspid = '"& _WorkspaceId &"';
+				let ConvertIntendedUsage = (enum: int) { case(enum == 0, 'Default', enum == 1, 'Scheduled', enum == 2, 'Interactive', enum == 3, 'Service', 'NA') };
+				let window =
+					PowerBIDatasetsWorkspace
+					| extend TimeGenerated=TimeGenerated+"& Number.ToText(#"UTC Offset Hours") &"h
+					| where TimeGenerated >=RangeStartTime and TimeGenerated <RangeEndTime
+					| where XmlaRequestId != '00000000-0000-0000-0000-000000000000'
+					| extend
+						effectiveClaims=coalesce(Identity.effectiveClaims.upn
+						, customData=Identity.effectiveClaims.customData)
+					| extend
+						DatasetId=ApplicationContext.DatasetId
+						, ReportId = ApplicationContext.Sources.[0].ReportId
+						, VisualId = ApplicationContext.Sources.[0].VisualId
+					| parse XmlaProperties with * '<DbpropMsmdRequestID>' RequestID '</DbpropMsmdRequestID>' *
+					| parse kind=regex flags=Ui XmlaProperties with '(.?)[a-zA-Z]*<SspropInitAppName>' RequestApp '<' *
+					;
+				let semanticmodel =
+					materialize(
+						window
+						| where ArtifactId != ''
+						| summarize arg_max(TimeGenerated, ArtifactId, ArtifactName, PowerBIWorkspaceId, PowerBIWorkspaceName, PremiumCapacityId) by XmlaRequestId
+						| where PowerBIWorkspaceId has wkspid and ArtifactId has dbid
+					)
+					;
+				let ExecutionMetrics =
+					window
+					| where OperationName == 'ExecutionMetrics'
+					| summarize arg_max(TimeGenerated, User, ExecutingUser, effectiveClaims, ReplicaId, CorrelationId, e=parse_json(EventText), ApplicationName) by XmlaRequestId
+					| join kind=inner semanticmodel on XmlaRequestId
+					| extend Status=iif(e has 'errorCount', 'Failed', 'Succeeded')
+					| project-away XmlaRequestId1
+					;
+				let Operation =
+					window
+					| where LogAnalyticsCategory in ('Progress Report', 'Command', 'Query') and OperationDetailName !='ExtAuth'
+					| summarize
+						arg_min(timeStart=TimeGenerated, User, ExecutingUser, effectiveClaims, DatasetMode, ApplicationName, LogAnalyticsCategory, OperationDetailName, RequestApp, RequestID, DatasetId, ReportId, VisualId, EventText)
+						, SequencePointCount=dcountif(CorrelationId,OperationDetailName == 'TabularSequencePoint')
+						, SequencePointEnd=maxif(TimeGenerated,OperationDetailName == 'TabularSequencePoint')
+						, SequencePointMs=maxif(DurationMs,OperationDetailName == 'TabularSequencePoint')
+						, Phase1CommitMs=maxif(DurationMs,OperationDetailName == 'TabularCommit' and EventText has ' 1 ')
+						, Phase2CommitMs=maxif(DurationMs,OperationDetailName == 'TabularCommit' and EventText has ' 2 ')
+						, arg_max(timeEnd=TimeGenerated, ReplicaId, OperationName, CorrelationId, CpuTimeMs, DurationMs, Level, Status, StatusCode)
+						by XmlaRequestId
+					| join kind=inner semanticmodel on XmlaRequestId
+					| project-away XmlaRequestId1
+					| where
+						RequestApp !in ('PowerBIEIM', 'Data Loss Prevention Scan')
+						and not(EventText has_any ('<Discover', '<Cancel', '<BeginTransaction', '<RollbackTransaction', '>Trace<'))
+						and OperationDetailName !='CommitTransaction'
+				;
+				ExecutionMetrics
+				| join kind=leftouter Operation on XmlaRequestId
+				| extend
+					timeStart=coalesce(todatetime(e.timeStart), timeStart), timeEnd=coalesce(todatetime(e.timeEnd), timeEnd)
+					, XmlaRequestId=coalesce(XmlaRequestId, XmlaRequestId1)
+					, ArtifactId=coalesce(ArtifactId, ArtifactId1)
+					, ArtifactName=coalesce(ArtifactName, ArtifactName1)
+					, PowerBIWorkspaceId=coalesce(PowerBIWorkspaceId, PowerBIWorkspaceId1)
+					, PowerBIWorkspaceName=coalesce(PowerBIWorkspaceName, PowerBIWorkspaceName1)
+					, PremiumCapacityId=coalesce(PremiumCapacityId, PremiumCapacityId1)
+					, User=coalesce(User, User1)
+					, ExecutingUser=coalesce(ExecutingUser, ExecutingUser1)
+					, effectiveClaims=coalesce(effectiveClaims, effectiveClaims1)
+					, ApplicationName=coalesce(ApplicationName, ApplicationName1)
+					, CorrelationId=coalesce(CorrelationId, CorrelationId1)
+					, ReplicaId=coalesce(ReplicaId, ReplicaId1)
+					, durationMs=coalesce(toint(e.durationMs), DurationMs)
+					, totalCpuTimeMs=coalesce(toint(e.totalCpuTimeMs), CpuTimeMs)
+					, Status=coalesce(Status1, Status)
+				| project 
+					timeStart
+					, timeEnd
+					, XmlaRequestId
+					, durationMs
+					, totalCpuTimeMs
+					, ArtifactId
+					, ArtifactName
+					, PowerBIWorkspaceId
+					, PowerBIWorkspaceName
+					, PremiumCapacityId
+					, User
+					, ExecutingUser
+					, effectiveClaims
+					, DatasetMode
+					, ReplicaId
+					, LogAnalyticsCategory
+					, OperationName
+					, OperationDetailName
+					, Level
+					, Status
+					, StatusCode
+					, CorrelationId
+					, ApplicationName
+					, e
+					, SequencePointCount
+					, SequencePointEnd
+					, SequencePointMs
+					, Phase1CommitMs
+					, Phase2CommitMs
+					, RequestApp
+					, RequestID
+					, DatasetId
+					, ReportId
+					, VisualId
+					, EventText
+				| lookup (window | summarize LogCnt=count() by XmlaRequestId) on XmlaRequestId
+				| extend
+					dimDateTime=bin(timeStart, 30s)
+					, dimDate=format_datetime(timeStart, 'yyyy-MM-dd')
+				| extend
+					RequestApp=case(RequestApp startswith 'PowerBI - Model Change Tracker', 'Power BI - Model Change Tracker', RequestApp startswith 'Power BI Desktop', 'Power BI Desktop', RequestApp startswith 'DAX Studio', 'DAX Studio', RequestApp startswith 'Deployment Utility', 'Deployment Utility', RequestApp startswith 'PowerBI - ExploreService', 'PowerBI - ExploreService', RequestApp startswith 'Microsoft SQL Server Management Studio', 'Microsoft SQL Server Management Studio', RequestApp startswith 'Tabular', 'TabularEditor', RequestApp startswith 'PowerBI - NaturalLanguageService', 'PowerBI - NaturalLanguageService', RequestApp startswith 'SQL Server Profiler', 'SQL Server Profiler', RequestApp)
+					, ApplicationName=case (ApplicationName startswith 'PowerBI - Model Change Tracker', 'Power BI - Model Change Tracker', ApplicationName startswith 'Power BI Desktop', 'Power BI Desktop', ApplicationName startswith 'DAX Studio', 'DAX Studio', ApplicationName startswith 'Deployment Utility', 'Deployment Utility', ApplicationName startswith 'PowerBI - ExploreService', 'PowerBI - ExploreService', ApplicationName startswith 'Microsoft SQL Server Management Studio', 'Microsoft SQL Server Management Studio', ApplicationName startswith 'Tabular', 'TabularEditor', ApplicationName startswith 'PowerBI - NaturalLanguageService', 'PowerBI - NaturalLanguageService', ApplicationName startswith 'SQL Server Profiler', 'SQL Server Profiler', ApplicationName)
+				| extend
+					approximatePeakMemConsumptionKB=toint(e.approximatePeakMemConsumptionKB)
+					, executionDelayMs=toint(e.executionDelayMs)
+					, vertipaqJobCpuTimeMs=toint(e.vertipaqJobCpuTimeMs)
+					, commandType=toint(e.commandType)
+					, errorCount=toint(e.errorCount)
+					, intendedUsage=toint(e.intendedUsage)
+					, discoverType=toint(e.discoverType)
+					, refreshParallelism=toint(e.refreshParallelism)
+					, vertipaqTotalRows =toint(e.vertipaqTotalRows)
+					, mEngineCpuTimeMs=toint(e.mEngineCpuTimeMs)
+					, mEnginePeakMemoryKB =toint(e.mEnginePeakMemoryKB)
+					, tabularConnectionTimeoutMs=toint(e.tabularConnectionTimeoutMs)
+					, qsoReplicaVersion=e.qsoReplicaVersion
+					, queryDialect=toint(e.queryDialect)
+					, queryResultRows=toint(e.queryResultRows)
+					, queryProcessingCpuTimeMs=toint(e.queryProcessingCpuTimeMs)
+					, capacityThrottlingMs=toint(e.capacityThrottlingMs)
+					, directQueryRequestCount=toint(e.directQueryRequestCount)
+					, directQueryTotalRows=toint(e.directQueryTotalRows)
+					, datasourceConnectionThrottleTimeMs=toint(e.datasourceConnectionThrottleTimeMs)
+					, directQueryConnectionTimeMs=toint(e.directQueryConnectionTimeMs)
+					, directQueryExecutionTimeMs=toint(e.directQueryExecutionTimeMs)
+					, directQueryIterationTimeMs=toint(e.directQueryIterationTimeMs)
+					, directQueryTotalTimeMs=toint(e.directQueryTotalTimeMs)
+					, directQueryTimeoutMs=toint(e.directQueryTimeoutMs)
+				| extend
+					qsoReplicaVersion=FileTimeToDateTime(qsoReplicaVersion)
+					, intendedUsage=ConvertIntendedUsage(intendedUsage)
+				| project-away e, EventText
+				| extend DurationBucketSort=case(isempty(durationMs), 0, durationMs <1000, 1, durationMs <10000, 2, durationMs <30000, 3, durationMs <60000, 4, durationMs <225000, 5, durationMs <1800000, 6, durationMs <3600000, 7, durationMs <7200000, 8, durationMs <18000000, 9, 99)
+				| extend DurationBucket=case(isempty(durationMs), 'No End', durationMs <1000, '<1s', durationMs <10000, '[1s, 10s)', durationMs <30000, '[10s, 30s)', durationMs <60000, '[30s, 60s)', durationMs <225000, '[60s, 225s)', durationMs <1800000, '[225s, 30m)', durationMs <3600000, '[30m, 60m)', durationMs <7200000, '[60m, 2h)', durationMs <=18000000, '[2h, 5h]', '>5h')
+				| extend timeStart=bin(timeStart,1s)+"& Number.ToText(#"UTC Offset Hours") &"h, timeEnd=bin(timeEnd,1s)+"& Number.ToText(#"UTC Offset Hours") &"h, qsoReplicaVersion=qsoReplicaVersion+"& Number.ToText(#"UTC Offset Hours") &"h
+				"
+				,[MaxRows=null, MaxSize=null, NoTruncate=true, AdditionalSetStatements=null]
+			),
+			#"Changed Type" = Table.TransformColumnTypes(Source,{{"dimDate", type date}})
+			in
+				#"Changed Type"	
+			```
+
 	measure 'Execution From' = MIN(ExecutionMetrics[timeStart])
 		formatString: yyyy-mm-dd hh:nn
 		displayFolder: General
@@ -180,7 +356,7 @@ table ExecutionMetrics
 		displayFolder: Query
 		lineageTag: dcc5e236-8fb9-4d74-ac82-903ca3d3506f
 
-	measure 'Distinct Query' = CALCULATE( DISTINCTCOUNT(EventText[EventTextHash]), ExecutionMetrics[LogAnalyticsCategory]="Query")
+	measure 'Distinct Query' = CALCULATE( DISTINCTCOUNT(EventText[EventText]), ExecutionMetrics[LogAnalyticsCategory]="Query")
 		formatString: 0
 		displayFolder: Query
 		lineageTag: aa560731-753a-4ead-ae06-c8226e2416ec
@@ -1142,82 +1318,177 @@ table ExecutionMetrics
 
 	partition ExecutionMetrics = m
 		mode: import
+		queryGroup: 'Log Analytics'
 		source = ```
-				// let RangeStartTime = datetime("& DateTime.ToText(RangeStart, "yyyy-MM-dd HH:mm:ss") &");
-				// let RangeEndTime = datetime("& DateTime.ToText(RangeEnd, "yyyy-MM-dd HH:mm:ss") &");
-				let AnalyticsQuery =
-				let Source = Json.Document(Web.Contents("https://api.loganalytics.io/v1/workspaces/" & #"Azure Log Analytics Workspace Id" & "/query", 
-				[Query=[#"query"="
-				set notruncation;
-				set ClientRequestIdPrefix='BYOLA ExecutionMetrics';
-				let FileTimeToDateTime = (fileTime: long) { unixtime_nanoseconds_todatetime((fileTime - 116444736000000000) * 100) };
-				let RangeStartTime = ago(" & Number.ToText(#"Days Ago To Start") & "d);
-				let RangeEndTime = ago(" & Number.ToText(#"Days Ago To Finish") & "d);
-				let dbid = '"& _ArtifactId &"';
-				let wkspid = '"& _WorkspaceId &"';
-				let ConvertIntendedUsage = (enum: int) { case(enum == 0, 'Default', enum == 1, 'Scheduled', enum == 2, 'Interactive', enum == 3, 'Service', 'NA') };
-				let window = PowerBIDatasetsWorkspace
-				| extend TimeGenerated=TimeGenerated+"& Number.ToText(#"UTC Offset Hours") &"h 
-				| where TimeGenerated >=RangeStartTime-7h and TimeGenerated <RangeEndTime+15m 
-				| extend effectiveClaims=coalesce(Identity.effectiveClaims.upn, customData=Identity.effectiveClaims.customData)
-				| extend DatasetId=ApplicationContext.DatasetId, ReportId = ApplicationContext.Sources.[0].ReportId, VisualId = ApplicationContext.Sources.[0].VisualId
-				| parse XmlaProperties with * '<DbpropMsmdRequestID>' RequestID '</DbpropMsmdRequestID>' *
-				| parse kind=regex flags=Ui XmlaProperties with '(.?)[a-zA-Z]*<SspropInitAppName>' RequestApp '<' *
-				;
-				let semanticmodel=materialize(window | where ArtifactId != '' 
-				| summarize arg_max(TimeGenerated, ArtifactId, ArtifactName, PowerBIWorkspaceId, PowerBIWorkspaceName, PremiumCapacityId) by XmlaRequestId
-				| where PowerBIWorkspaceId has wkspid and ArtifactId has dbid)
-				;
-				let ExecutionMetrics = window | where OperationName == 'ExecutionMetrics'
-				| summarize arg_max(TimeGenerated, User, ExecutingUser, effectiveClaims, ReplicaId, CorrelationId, e=parse_json(EventText), ApplicationName) by XmlaRequestId
-				| join kind=inner semanticmodel on XmlaRequestId
-				| extend Status=iif(e has 'errorCount', 'Failed', 'Succeeded')
-				| project-away XmlaRequestId1
-				;
-				let Operation = window
-				| where LogAnalyticsCategory in ('Progress Report', 'Command', 'Query') and OperationDetailName !='ExtAuth'
-				| summarize arg_min(timeStart=TimeGenerated, User, ExecutingUser, effectiveClaims, DatasetMode, ApplicationName, LogAnalyticsCategory, OperationDetailName, RequestApp, RequestID, DatasetId, ReportId, VisualId, EventText), SequencePointCount=dcountif(CorrelationId,OperationDetailName == 'TabularSequencePoint'), SequencePointEnd=maxif(TimeGenerated,OperationDetailName == 'TabularSequencePoint'), SequencePointMs=maxif(DurationMs,OperationDetailName == 'TabularSequencePoint'), Phase1CommitMs=maxif(DurationMs,OperationDetailName == 'TabularCommit' and EventText has ' 1 '), Phase2CommitMs=maxif(DurationMs,OperationDetailName == 'TabularCommit' and EventText has ' 2 '), arg_max(timeEnd=TimeGenerated, ReplicaId, OperationName, CorrelationId, CpuTimeMs, DurationMs, Level, Status, StatusCode) by XmlaRequestId
-				| join kind=inner semanticmodel on XmlaRequestId| project-away XmlaRequestId1
-				| where RequestApp !in ('PowerBIEIM', 'Data Loss Prevention Scan') and not(EventText has_any ('<Discover', '<Cancel', '<BeginTransaction', '<RollbackTransaction', '>Trace<')) and OperationDetailName !='CommitTransaction'
-				;
-				ExecutionMetrics
-				| join kind=fullouter Operation on XmlaRequestId
-				| extend timeStart=coalesce(todatetime(e.timeStart), timeStart), timeEnd=coalesce(todatetime(e.timeEnd), timeEnd), XmlaRequestId=coalesce(XmlaRequestId, XmlaRequestId1), ArtifactId=coalesce(ArtifactId, ArtifactId1), ArtifactName=coalesce(ArtifactName, ArtifactName1), PowerBIWorkspaceId=coalesce(PowerBIWorkspaceId, PowerBIWorkspaceId1), PowerBIWorkspaceName=coalesce(PowerBIWorkspaceName, PowerBIWorkspaceName1), PremiumCapacityId=coalesce(PremiumCapacityId, PremiumCapacityId1), User=coalesce(User, User1), ExecutingUser=coalesce(ExecutingUser, ExecutingUser1), effectiveClaims=coalesce(effectiveClaims, effectiveClaims1), ApplicationName=coalesce(ApplicationName, ApplicationName1), CorrelationId=coalesce(CorrelationId, CorrelationId1), ReplicaId=coalesce(ReplicaId, ReplicaId1), durationMs=coalesce(toint(e.durationMs), DurationMs), totalCpuTimeMs=coalesce(toint(e.totalCpuTimeMs), CpuTimeMs), Status=coalesce(Status1, Status)
-				| project timeStart, timeEnd, XmlaRequestId, durationMs, totalCpuTimeMs, ArtifactId, ArtifactName, PowerBIWorkspaceId, PowerBIWorkspaceName, PremiumCapacityId, User, ExecutingUser, effectiveClaims, DatasetMode, ReplicaId, LogAnalyticsCategory, OperationName, OperationDetailName, Level, Status, StatusCode, CorrelationId, ApplicationName, e, SequencePointCount, SequencePointEnd, SequencePointMs, Phase1CommitMs, Phase2CommitMs, RequestApp, RequestID, DatasetId, ReportId, VisualId, EventText
-				| where timeEnd >= RangeStartTime and timeEnd < RangeEndTime
-				| lookup (window | summarize LogCnt=count() by XmlaRequestId) on XmlaRequestId
-				| extend dimDate=bin(timeStart, 30s)
-				| extend RequestApp=case(RequestApp startswith 'PowerBI - Model Change Tracker', 'Power BI - Model Change Tracker', RequestApp startswith 'Power BI Desktop', 'Power BI Desktop', RequestApp startswith 'DAX Studio', 'DAX Studio', RequestApp startswith 'Deployment Utility', 'Deployment Utility', RequestApp startswith 'PowerBI - ExploreService', 'PowerBI - ExploreService', RequestApp startswith 'Microsoft SQL Server Management Studio', 'Microsoft SQL Server Management Studio', RequestApp startswith 'Tabular', 'TabularEditor', RequestApp startswith 'PowerBI - NaturalLanguageService', 'PowerBI - NaturalLanguageService', RequestApp startswith 'SQL Server Profiler', 'SQL Server Profiler', RequestApp)
-				, ApplicationName=case (ApplicationName startswith 'PowerBI - Model Change Tracker', 'Power BI - Model Change Tracker', ApplicationName startswith 'Power BI Desktop', 'Power BI Desktop', ApplicationName startswith 'DAX Studio', 'DAX Studio', ApplicationName startswith 'Deployment Utility', 'Deployment Utility', ApplicationName startswith 'PowerBI - ExploreService', 'PowerBI - ExploreService', ApplicationName startswith 'Microsoft SQL Server Management Studio', 'Microsoft SQL Server Management Studio', ApplicationName startswith 'Tabular', 'TabularEditor', ApplicationName startswith 'PowerBI - NaturalLanguageService', 'PowerBI - NaturalLanguageService', ApplicationName startswith 'SQL Server Profiler', 'SQL Server Profiler', ApplicationName)
-				| extend approximatePeakMemConsumptionKB=toint(e.approximatePeakMemConsumptionKB), executionDelayMs=toint(e.executionDelayMs), vertipaqJobCpuTimeMs=toint(e.vertipaqJobCpuTimeMs), commandType=toint(e.commandType), errorCount=toint(e.errorCount), intendedUsage=toint(e.intendedUsage), discoverType=toint(e.discoverType), refreshParallelism=toint(e.refreshParallelism), vertipaqTotalRows =toint(e.vertipaqTotalRows), mEngineCpuTimeMs=toint(e.mEngineCpuTimeMs), mEnginePeakMemoryKB =toint(e.mEnginePeakMemoryKB), tabularConnectionTimeoutMs=toint(e.tabularConnectionTimeoutMs), qsoReplicaVersion=e.qsoReplicaVersion, queryDialect=toint(e.queryDialect), queryResultRows=toint(e.queryResultRows), queryProcessingCpuTimeMs=toint(e.queryProcessingCpuTimeMs), capacityThrottlingMs=toint(e.capacityThrottlingMs), directQueryRequestCount=toint(e.directQueryRequestCount), directQueryTotalRows=toint(e.directQueryTotalRows), datasourceConnectionThrottleTimeMs=toint(e.datasourceConnectionThrottleTimeMs), directQueryConnectionTimeMs=toint(e.directQueryConnectionTimeMs), directQueryExecutionTimeMs=toint(e.directQueryExecutionTimeMs), directQueryIterationTimeMs=toint(e.directQueryIterationTimeMs), directQueryTotalTimeMs=toint(e.directQueryTotalTimeMs), directQueryTimeoutMs=toint(e.directQueryTimeoutMs)
-				| extend qsoReplicaVersion=FileTimeToDateTime(qsoReplicaVersion), intendedUsage=ConvertIntendedUsage(intendedUsage)
-				| project-away e, EventText
-				| extend DurationBucketSort=case(isempty(durationMs), 0, durationMs <1000, 1, durationMs <10000, 2, durationMs <30000, 3, durationMs <60000, 4, durationMs <225000, 5, durationMs <1800000, 6, durationMs <3600000, 7, durationMs <7200000, 8, durationMs <18000000, 9, 99)
-				| extend DurationBucket=case(isempty(durationMs), 'No End', durationMs <1000, '<1s', durationMs <10000, '[1s, 10s)', durationMs <30000, '[10s, 30s)', durationMs <60000, '[30s, 60s)', durationMs <225000, '[60s, 225s)', durationMs <1800000, '[225s, 30m)', durationMs <3600000, '[30m, 60m)', durationMs <7200000, '[60m, 2h)', durationMs <=18000000, '[2h, 5h]', '>5h')
-				| extend timeStart=bin(timeStart,1s)+"& Number.ToText(#"UTC Offset Hours") &"h, timeEnd=bin(timeEnd,1s)+"& Number.ToText(#"UTC Offset Hours") &"h, qsoReplicaVersion=qsoReplicaVersion+"& Number.ToText(#"UTC Offset Hours") &"h 
-				",#"x-ms-app"="OmsAnalyticsPBI",#"prefer"="ai.response-thinning=true"],Timeout=#duration(0,0,10,0)])),
-				TypeMap = #table(
-				{ "AnalyticsTypes", "Type" }, 
-				{ 
-				{ "string",   Text.Type },
-				{ "int",      Int32.Type },
-				{ "long",     Int64.Type },
-				{ "real",     Double.Type },
-				{ "timespan", Duration.Type },
-				{ "datetime", DateTimeZone.Type },
-				{ "bool",     Logical.Type },
-				{ "guid",     Text.Type },
-				{ "dynamic",  Text.Type }
-				}),
-				DataTable = Source[tables]{0},
-				Columns = Table.FromRecords(DataTable[columns]),
-				ColumnsWithType = Table.Join(Columns, {"type"}, TypeMap , {"AnalyticsTypes"}),
-				Rows = Table.FromRows(DataTable[rows], Columns[name]), 
-				Table = Table.TransformColumnTypes(Rows, Table.ToList(ColumnsWithType, (c) => { c{0}, c{3}}))
+				let
+				RangeStartTime = DateTime.ToText(RangeStart,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+				RangeEndTime = DateTime.ToText(RangeEnd,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+				Source = AzureDataExplorer.Contents(
+					#"Azure Log Analytics Path"
+					, #"Azure Log Analytics Workspace Name"
+					,"
+					set notruncation;
+					set ClientRequestIdPrefix='BYOLA ExecutionMetrics';
+					let FileTimeToDateTime = (fileTime: long) { unixtime_nanoseconds_todatetime((fileTime - 116444736000000000) * 100) };
+					let RangeStartTime = todatetime('" & RangeStartTime & "');
+					let RangeEndTime = todatetime('" & RangeEndTime & "');
+					let dbid = '"& _ArtifactId &"';
+					let wkspid = '"& _WorkspaceId &"';
+					let ConvertIntendedUsage = (enum: int) { case(enum == 0, 'Default', enum == 1, 'Scheduled', enum == 2, 'Interactive', enum == 3, 'Service', 'NA') };
+					let window =
+						PowerBIDatasetsWorkspace
+						| extend TimeGenerated=TimeGenerated+"& Number.ToText(#"UTC Offset Hours") &"h
+						| where TimeGenerated >=RangeStartTime and TimeGenerated <RangeEndTime
+						| where XmlaRequestId != '00000000-0000-0000-0000-000000000000'
+						| extend
+							effectiveClaims=coalesce(Identity.effectiveClaims.upn
+							, customData=Identity.effectiveClaims.customData)
+						| extend
+							DatasetId=ApplicationContext.DatasetId
+							, ReportId = ApplicationContext.Sources.[0].ReportId
+							, VisualId = ApplicationContext.Sources.[0].VisualId
+						| parse XmlaProperties with * '<DbpropMsmdRequestID>' RequestID '</DbpropMsmdRequestID>' *
+						| parse kind=regex flags=Ui XmlaProperties with '(.?)[a-zA-Z]*<SspropInitAppName>' RequestApp '<' *
+						;
+					let semanticmodel =
+						materialize(
+							window
+							| where ArtifactId != ''
+							| summarize arg_max(TimeGenerated, ArtifactId, ArtifactName, PowerBIWorkspaceId, PowerBIWorkspaceName, PremiumCapacityId) by XmlaRequestId
+							| where PowerBIWorkspaceId has wkspid and ArtifactId has dbid
+						)
+						;
+					let ExecutionMetrics =
+						window
+						| where OperationName == 'ExecutionMetrics'
+						| summarize arg_max(TimeGenerated, User, ExecutingUser, effectiveClaims, ReplicaId, CorrelationId, e=parse_json(EventText), ApplicationName) by XmlaRequestId
+						| join kind=inner semanticmodel on XmlaRequestId
+						| extend Status=iif(e has 'errorCount', 'Failed', 'Succeeded')
+						| project-away XmlaRequestId1
+						;
+					let Operation =
+						window
+						| where LogAnalyticsCategory in ('Progress Report', 'Command', 'Query') and OperationDetailName !='ExtAuth'
+						| summarize
+							arg_min(timeStart=TimeGenerated, User, ExecutingUser, effectiveClaims, DatasetMode, ApplicationName, LogAnalyticsCategory, OperationDetailName, RequestApp, RequestID, DatasetId, ReportId, VisualId, EventText)
+							, SequencePointCount=dcountif(CorrelationId,OperationDetailName == 'TabularSequencePoint')
+							, SequencePointEnd=maxif(TimeGenerated,OperationDetailName == 'TabularSequencePoint')
+							, SequencePointMs=maxif(DurationMs,OperationDetailName == 'TabularSequencePoint')
+							, Phase1CommitMs=maxif(DurationMs,OperationDetailName == 'TabularCommit' and EventText has ' 1 ')
+							, Phase2CommitMs=maxif(DurationMs,OperationDetailName == 'TabularCommit' and EventText has ' 2 ')
+							, arg_max(timeEnd=TimeGenerated, ReplicaId, OperationName, CorrelationId, CpuTimeMs, DurationMs, Level, Status, StatusCode)
+							by XmlaRequestId
+						| join kind=inner semanticmodel on XmlaRequestId
+						| project-away XmlaRequestId1
+						| where
+							RequestApp !in ('PowerBIEIM', 'Data Loss Prevention Scan')
+							and not(EventText has_any ('<Discover', '<Cancel', '<BeginTransaction', '<RollbackTransaction', '>Trace<'))
+							and OperationDetailName !='CommitTransaction'
+					;
+					ExecutionMetrics
+					| join kind=leftouter Operation on XmlaRequestId
+					| extend
+						timeStart=coalesce(todatetime(e.timeStart), timeStart), timeEnd=coalesce(todatetime(e.timeEnd), timeEnd)
+						, XmlaRequestId=coalesce(XmlaRequestId, XmlaRequestId1)
+						, ArtifactId=coalesce(ArtifactId, ArtifactId1)
+						, ArtifactName=coalesce(ArtifactName, ArtifactName1)
+						, PowerBIWorkspaceId=coalesce(PowerBIWorkspaceId, PowerBIWorkspaceId1)
+						, PowerBIWorkspaceName=coalesce(PowerBIWorkspaceName, PowerBIWorkspaceName1)
+						, PremiumCapacityId=coalesce(PremiumCapacityId, PremiumCapacityId1)
+						, User=coalesce(User, User1)
+						, ExecutingUser=coalesce(ExecutingUser, ExecutingUser1)
+						, effectiveClaims=coalesce(effectiveClaims, effectiveClaims1)
+						, ApplicationName=coalesce(ApplicationName, ApplicationName1)
+						, CorrelationId=coalesce(CorrelationId, CorrelationId1)
+						, ReplicaId=coalesce(ReplicaId, ReplicaId1)
+						, durationMs=coalesce(toint(e.durationMs), DurationMs)
+						, totalCpuTimeMs=coalesce(toint(e.totalCpuTimeMs), CpuTimeMs)
+						, Status=coalesce(Status1, Status)
+					| project 
+						timeStart
+						, timeEnd
+						, XmlaRequestId
+						, durationMs
+						, totalCpuTimeMs
+						, ArtifactId
+						, ArtifactName
+						, PowerBIWorkspaceId
+						, PowerBIWorkspaceName
+						, PremiumCapacityId
+						, User
+						, ExecutingUser
+						, effectiveClaims
+						, DatasetMode
+						, ReplicaId
+						, LogAnalyticsCategory
+						, OperationName
+						, OperationDetailName
+						, Level
+						, Status
+						, StatusCode
+						, CorrelationId
+						, ApplicationName
+						, e
+						, SequencePointCount
+						, SequencePointEnd
+						, SequencePointMs
+						, Phase1CommitMs
+						, Phase2CommitMs
+						, RequestApp
+						, RequestID
+						, DatasetId
+						, ReportId
+						, VisualId
+						, EventText
+					| lookup (window | summarize LogCnt=count() by XmlaRequestId) on XmlaRequestId
+					| extend
+						dimDateTime=bin(timeStart, 30s)
+						, dimDate=format_datetime(timeStart, 'yyyy-MM-dd')
+					| extend
+						RequestApp=case(RequestApp startswith 'PowerBI - Model Change Tracker', 'Power BI - Model Change Tracker', RequestApp startswith 'Power BI Desktop', 'Power BI Desktop', RequestApp startswith 'DAX Studio', 'DAX Studio', RequestApp startswith 'Deployment Utility', 'Deployment Utility', RequestApp startswith 'PowerBI - ExploreService', 'PowerBI - ExploreService', RequestApp startswith 'Microsoft SQL Server Management Studio', 'Microsoft SQL Server Management Studio', RequestApp startswith 'Tabular', 'TabularEditor', RequestApp startswith 'PowerBI - NaturalLanguageService', 'PowerBI - NaturalLanguageService', RequestApp startswith 'SQL Server Profiler', 'SQL Server Profiler', RequestApp)
+						, ApplicationName=case (ApplicationName startswith 'PowerBI - Model Change Tracker', 'Power BI - Model Change Tracker', ApplicationName startswith 'Power BI Desktop', 'Power BI Desktop', ApplicationName startswith 'DAX Studio', 'DAX Studio', ApplicationName startswith 'Deployment Utility', 'Deployment Utility', ApplicationName startswith 'PowerBI - ExploreService', 'PowerBI - ExploreService', ApplicationName startswith 'Microsoft SQL Server Management Studio', 'Microsoft SQL Server Management Studio', ApplicationName startswith 'Tabular', 'TabularEditor', ApplicationName startswith 'PowerBI - NaturalLanguageService', 'PowerBI - NaturalLanguageService', ApplicationName startswith 'SQL Server Profiler', 'SQL Server Profiler', ApplicationName)
+					| extend
+						approximatePeakMemConsumptionKB=toint(e.approximatePeakMemConsumptionKB)
+						, executionDelayMs=toint(e.executionDelayMs)
+						, vertipaqJobCpuTimeMs=toint(e.vertipaqJobCpuTimeMs)
+						, commandType=toint(e.commandType)
+						, errorCount=toint(e.errorCount)
+						, intendedUsage=toint(e.intendedUsage)
+						, discoverType=toint(e.discoverType)
+						, refreshParallelism=toint(e.refreshParallelism)
+						, vertipaqTotalRows =toint(e.vertipaqTotalRows)
+						, mEngineCpuTimeMs=toint(e.mEngineCpuTimeMs)
+						, mEnginePeakMemoryKB =toint(e.mEnginePeakMemoryKB)
+						, tabularConnectionTimeoutMs=toint(e.tabularConnectionTimeoutMs)
+						, qsoReplicaVersion=e.qsoReplicaVersion
+						, queryDialect=toint(e.queryDialect)
+						, queryResultRows=toint(e.queryResultRows)
+						, queryProcessingCpuTimeMs=toint(e.queryProcessingCpuTimeMs)
+						, capacityThrottlingMs=toint(e.capacityThrottlingMs)
+						, directQueryRequestCount=toint(e.directQueryRequestCount)
+						, directQueryTotalRows=toint(e.directQueryTotalRows)
+						, datasourceConnectionThrottleTimeMs=toint(e.datasourceConnectionThrottleTimeMs)
+						, directQueryConnectionTimeMs=toint(e.directQueryConnectionTimeMs)
+						, directQueryExecutionTimeMs=toint(e.directQueryExecutionTimeMs)
+						, directQueryIterationTimeMs=toint(e.directQueryIterationTimeMs)
+						, directQueryTotalTimeMs=toint(e.directQueryTotalTimeMs)
+						, directQueryTimeoutMs=toint(e.directQueryTimeoutMs)
+					| extend
+						qsoReplicaVersion=FileTimeToDateTime(qsoReplicaVersion)
+						, intendedUsage=ConvertIntendedUsage(intendedUsage)
+					| project-away e, EventText
+					| extend DurationBucketSort=case(isempty(durationMs), 0, durationMs <1000, 1, durationMs <10000, 2, durationMs <30000, 3, durationMs <60000, 4, durationMs <225000, 5, durationMs <1800000, 6, durationMs <3600000, 7, durationMs <7200000, 8, durationMs <18000000, 9, 99)
+					| extend DurationBucket=case(isempty(durationMs), 'No End', durationMs <1000, '<1s', durationMs <10000, '[1s, 10s)', durationMs <30000, '[10s, 30s)', durationMs <60000, '[30s, 60s)', durationMs <225000, '[60s, 225s)', durationMs <1800000, '[225s, 30m)', durationMs <3600000, '[30m, 60m)', durationMs <7200000, '[60m, 2h)', durationMs <=18000000, '[2h, 5h]', '>5h')
+					| extend timeStart=bin(timeStart,1s)+"& Number.ToText(#"UTC Offset Hours") &"h, timeEnd=bin(timeEnd,1s)+"& Number.ToText(#"UTC Offset Hours") &"h, qsoReplicaVersion=qsoReplicaVersion+"& Number.ToText(#"UTC Offset Hours") &"h
+					"
+					,[MaxRows=null, MaxSize=null, NoTruncate=true, AdditionalSetStatements=null]
+				),
+				#"Changed Type" = Table.TransformColumnTypes(Source,{{"dimDate", type date}})
 				in
-				Table
-				in AnalyticsQuery
+					#"Changed Type"	
 				```
 
 	annotation PBI_ResultType = Table
+
+	annotation PBI-IsMQueryFoldable = True
 

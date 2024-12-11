@@ -1,6 +1,109 @@
 table 'Progress Report'
 	lineageTag: 601fa947-27b9-4435-83b5-38a0fb1dcd5a
 
+	refreshPolicy
+		policyType: basic
+		rollingWindowGranularity: month
+		rollingWindowPeriods: 2
+		incrementalGranularity: day
+		incrementalPeriods: 2
+		incrementalPeriodsOffset: -1
+		sourceExpression = ```
+			let
+			RangeStartTime = DateTime.ToText(RangeStart,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+			RangeEndTime = DateTime.ToText(RangeEnd,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+			Source = AzureDataExplorer.Contents(
+				#"Azure Log Analytics Path"
+				, #"Azure Log Analytics Workspace Name"
+				,"
+				set notruncation;
+				set ClientRequestIdPrefix='BYOLA Progress Report';
+				let RangeStartTime = todatetime('" & RangeStartTime & "');
+				let RangeEndTime = todatetime('" & RangeEndTime & "');
+				let dbid = '"& _ArtifactId &"';
+				let wkspid = '"& _WorkspaceId &"';
+				let window = PowerBIDatasetsWorkspace
+					| extend TimeGenerated=TimeGenerated+"& Number.ToText(#"UTC Offset Hours") &"h
+					| where TimeGenerated >=RangeStartTime and TimeGenerated <RangeEndTime
+					| where XmlaRequestId != '00000000-0000-0000-0000-000000000000'
+					| where ArtifactId has dbid and PowerBIWorkspaceId has wkspid
+					| where LogAnalyticsCategory =='Progress Report'
+					| where OperationDetailName in ('ReadData', 'ExecuteSql', 'CompressSegment', 'TabularRefresh')
+					| where not(OperationName =='ProgressReportError' and OperationDetailName =='TabularRefresh' and EventText !has 'Internal Error Code')
+					| extend ObjectName = tostring( split(XmlaObjectPath,'.').[3])
+					| project 
+						endTime=TimeGenerated
+						, XmlaRequestId
+						, CorrelationId
+						, OperationDetailName
+						, DurationMs
+						, CpuTimeMs
+						, ObjectCount=ProgressCounter
+						, Status
+						, StatusCode
+						, XmlaObjectPath
+						, ObjectName
+						, EventText
+						, ObjectType = case(OperationDetailName in ('ReadData', 'ExecuteSql', 'CompressSegment'), 'Partition'
+						, EventText contains ' parti' or EventText contains 'osion' or EventText contains 'partycji' or EventText contains 'skaidinio' or EventText contains 'дяла' or EventText contains 'διαμερίσματος' or EventText contains 'nodalījuma' or EventText contains 'oddílu' or EventText contains 'bölümünün' or EventText contains 'พาร์ติชั' or EventText contains '分区' or EventText contains 'パーティション' or EventText contains '파티션', 'Partition'
+						, EventText contains ' hiera' or EventText contains 'jerar' or EventText contains 'rarchi' or EventText contains 'erarh' or EventText contains 'ιεραρχίας' or EventText contains 'ерарх' or EventText contains 'hiyerarşisinin' or EventText contains 'ลำดับชั้น' or EventText contains '层次' or EventText contains '階層' or EventText contains '계층 구조', 'Hierarchy'
+						, EventText contains ' calc' or EventText contains 'beräknade' or EventText contains 'berechneten' or EventText contains 'beregne' or EventText contains 'počítaného' or EventText contains 'berekende' or EventText contains 'lasketun' or EventText contains 'izračun' or EventText contains 'apskaičiuotojo' or EventText contains 'obliczeniowej' or EventText contains 'числяе' or EventText contains 'υπολογισμένης' or EventText contains 'aprēķinātās' or EventText contains 'hesaplanmış' or EventText contains 'ารคำน' or EventText contains '算' or EventText contains '계산', 'Calculated column'
+						, XmlaObjectPath has 'CalculatedTable', 'Calculated Table'
+						, XmlaObjectPath has 'CalculationGroup', 'Calculation Group'
+						, OperationDetailName =='TabularRefresh' and split(XmlaObjectPath,'.').[3]=='', 'Relationship', '')
+					| extend
+						TableName=iif(ObjectType != 'Relationship', split(XmlaObjectPath,'.').[2],'')
+						, PartitionName=iif(ObjectType == 'Partition', split(XmlaObjectPath,'.').[3],'')
+					| extend startTime=datetime_add('millisecond', -DurationMs, endTime)
+					| parse EventText with * '[MashupCPUTime: ' MashupCPUTime:long ' ms, MashupPeakMemory: '  MashupPeakMemory:long ' KB]'
+					| parse EventText with * 'Internal Error Code: \'' ErrorHex '\'' *
+					| extend TableTMID = extract(""TableTMID='([0-9]+)'"", 1, EventText), PartitionTMID = extract(""PartitionTMID='([0-9]+)'"", 1, EventText)
+					;
+				let TMID =
+					window
+					| where EventText has 'TableTMID='
+					| summarize arg_min(startTime, TableTMID, PartitionTMID) by CorrelationId
+					;
+				let DataRefresh =
+					window
+					| where OperationDetailName != 'CompressSegment'// in ('TabularRefresh')
+					| summarize
+						startTime=iif(isempty(min(startTime)),min(endTime), min(startTime))
+						, endTime=arg_max(endTime, ObjectName, CorrelationId, MashupCPUTime, MashupPeakMemory)
+						, DurationMs=sum(DurationMs)
+						, CpuTimeMs=sum(CpuTimeMs)
+						, ObjectCount=max(ObjectCount)
+						, TmObjCount=dcount(XmlaObjectPath)
+						, Status=max(Status)
+						, StatusCode = min_of(min(StatusCode), toint(min(ErrorHex)))
+						by TableName, PartitionName, XmlaRequestId, OperationDetailName, ObjectType
+					| extend 
+						ObjectCount=iff(ObjectType =='Partition', ObjectCount, TmObjCount)
+						, ErrorTimeMs=iif(StatusCode <0, datetime_part('millisecond',endTime), toint(''))
+					| join kind=leftouter TMID on CorrelationId
+					| project-away TmObjCount, CorrelationId1, startTime1
+					;
+				let PartitionColumn =
+					window
+					| where OperationDetailName == 'CompressSegment'
+					| parse EventText with * '<ccon>' columnName '</ccon>' *
+					| summarize 
+						arg_min(startTime, ObjectType, OperationDetailName)
+						, endTime=max(endTime), DurationMs=sum(DurationMs)
+						, CpuTimeMs=sum(CpuTimeMs)
+						, ObjectCount=dcount(columnName)
+						, Status=min(Status)
+						, StatusCode = min(StatusCode)
+						by TableName, PartitionName, XmlaRequestId, TableTMID, PartitionTMID
+					;
+				DataRefresh
+				| union PartitionColumn
+				"
+				,[MaxRows=null, MaxSize=null, NoTruncate=true, AdditionalSetStatements=null]
+			)
+			in Source	
+			```
+
 	measure 'Max Row Processed' = SUMX(SUMMARIZE('Progress Report',Artifact[ArtifactId],'Progress Report'[TableName],'Progress Report'[PartitionName]),CALCULATE(MAX('Progress Report'[ObjectCount]),'Progress Report'[OperationDetailName]="ReadData",VALUES('Progress Report'[XmlaRequestId])))
 		formatString: #,0
 		lineageTag: 1078b192-fb34-49df-901d-53a597eebdc5
@@ -460,75 +563,104 @@ table 'Progress Report'
 
 	partition 'Progress Report-fa42a3b4-aab1-4f5a-9981-32ffd22162a1' = m
 		mode: import
+		queryGroup: 'Log Analytics'
 		source = ```
-				let AnalyticsQuery =
-				let Source = Json.Document(Web.Contents("https://api.loganalytics.io/v1/workspaces/" & #"Azure Log Analytics Workspace Id" & "/query", 
-				[Query=[#"query"="
-				set notruncation;
-				set ClientRequestIdPrefix='BYOLA Progress Report';
-				let RangeStartTime = ago(" & Number.ToText(#"Days Ago To Start") & "d);
-				let RangeEndTime = ago(" & Number.ToText(#"Days Ago To Finish") & "d);
-				let dbid = '"& _ArtifactId &"';
-				let wkspid = '"& _WorkspaceId &"';
-				let window = PowerBIDatasetsWorkspace
-				| extend TimeGenerated=TimeGenerated+"& Number.ToText(#"UTC Offset Hours") &"h 
-				| where TimeGenerated >=RangeStartTime-7h and TimeGenerated <RangeEndTime+15m
-				| where ArtifactId has dbid and PowerBIWorkspaceId has wkspid
-				| where LogAnalyticsCategory =='Progress Report'
-				| where OperationDetailName in ('ReadData', 'ExecuteSql', 'CompressSegment', 'TabularRefresh')
-				| where not(OperationName =='ProgressReportError' and OperationDetailName =='TabularRefresh' and EventText !has 'Internal Error Code')
-				| extend ObjectName = tostring( split(XmlaObjectPath,'.').[3])
-				| project endTime=TimeGenerated, XmlaRequestId, CorrelationId, OperationDetailName, DurationMs, CpuTimeMs, ObjectCount=ProgressCounter, Status, StatusCode, XmlaObjectPath, ObjectName, EventText
-				, ObjectType = case(OperationDetailName in ('ReadData', 'ExecuteSql', 'CompressSegment'), 'Partition'
-				, EventText contains ' parti' or EventText contains 'osion' or EventText contains 'partycji' or EventText contains 'skaidinio' or EventText contains 'дяла' or EventText contains 'διαμερίσματος' or EventText contains 'nodalījuma' or EventText contains 'oddílu' or EventText contains 'bölümünün' or EventText contains 'พาร์ติชั' or EventText contains '分区' or EventText contains 'パーティション' or EventText contains '파티션', 'Partition'
-				, EventText contains ' hiera' or EventText contains 'jerar' or EventText contains 'rarchi' or EventText contains 'erarh' or EventText contains 'ιεραρχίας' or EventText contains 'ерарх' or EventText contains 'hiyerarşisinin' or EventText contains 'ลำดับชั้น' or EventText contains '层次' or EventText contains '階層' or EventText contains '계층 구조', 'Hierarchy'
-				, EventText contains ' calc' or EventText contains 'beräknade' or EventText contains 'berechneten' or EventText contains 'beregne' or EventText contains 'počítaného' or EventText contains 'berekende' or EventText contains 'lasketun' or EventText contains 'izračun' or EventText contains 'apskaičiuotojo' or EventText contains 'obliczeniowej' or EventText contains 'числяе' or EventText contains 'υπολογισμένης' or EventText contains 'aprēķinātās' or EventText contains 'hesaplanmış' or EventText contains 'ารคำน' or EventText contains '算' or EventText contains '계산', 'Calculated column'
-				, XmlaObjectPath has 'CalculatedTable', 'Calculated Table'
-				, XmlaObjectPath has 'CalculationGroup', 'Calculation Group'
-				, OperationDetailName =='TabularRefresh' and split(XmlaObjectPath,'.').[3]=='', 'Relationship', '')
-				| extend TableName=iif(ObjectType != 'Relationship', split(XmlaObjectPath,'.').[2],'')
-				, PartitionName=iif(ObjectType == 'Partition', split(XmlaObjectPath,'.').[3],'')
-				| extend startTime=datetime_add('millisecond', -DurationMs, endTime)
-				| parse EventText with * '[MashupCPUTime: ' MashupCPUTime:long ' ms, MashupPeakMemory: '  MashupPeakMemory:long ' KB]'
-				| parse EventText with * 'Internal Error Code: \'' ErrorHex '\'' *
-				| extend TableTMID = extract(""TableTMID='([0-9]+)'"", 1, EventText), PartitionTMID = extract(""PartitionTMID='([0-9]+)'"", 1, EventText)
-				;
-				let TMID = window | where EventText has 'TableTMID='| summarize arg_min(startTime, TableTMID, PartitionTMID) by CorrelationId;
-				let DataRefresh = window| where OperationDetailName != 'CompressSegment'// in ('TabularRefresh')
-				| summarize startTime=iif(isempty(min(startTime)),min(endTime), min(startTime)), endTime=arg_max(endTime, ObjectName, CorrelationId, MashupCPUTime, MashupPeakMemory), DurationMs=sum(DurationMs), CpuTimeMs=sum(CpuTimeMs), ObjectCount=max(ObjectCount), TmObjCount=dcount(XmlaObjectPath), Status=max(Status), StatusCode = min_of(min(StatusCode), toint(min(ErrorHex))) by TableName, PartitionName, XmlaRequestId, OperationDetailName, ObjectType
-				| extend ObjectCount=iff(ObjectType =='Partition', ObjectCount, TmObjCount), ErrorTimeMs=iif(StatusCode <0, datetime_part('millisecond',endTime), toint(''))
-				| join kind=leftouter TMID on CorrelationId
-				| project-away TmObjCount, CorrelationId1, startTime1
-				;
-				let PartitionColumn = window | where OperationDetailName == 'CompressSegment'| parse EventText with * '<ccon>' columnName '</ccon>' *
-				| summarize arg_min(startTime, ObjectType, OperationDetailName), endTime=max(endTime), DurationMs=sum(DurationMs), CpuTimeMs=sum(CpuTimeMs), ObjectCount=dcount(columnName), Status=min(Status), StatusCode = min(StatusCode) by TableName, PartitionName, XmlaRequestId, TableTMID, PartitionTMID
-				;
-				DataRefresh|union PartitionColumn
-				| where endTime >=RangeStartTime and endTime <RangeEndTime
-				",#"x-ms-app"="OmsAnalyticsPBI",#"prefer"="ai.response-thinning=true"],Timeout=#duration(0,0,4,0)])),
-				TypeMap = #table(
-				{ "AnalyticsTypes", "Type" }, 
-				{ 
-				{ "string",   Text.Type },
-				{ "int",      Int32.Type },
-				{ "long",     Int64.Type },
-				{ "real",     Double.Type },
-				{ "timespan", Duration.Type },
-				{ "datetime", DateTimeZone.Type },
-				{ "bool",     Logical.Type },
-				{ "guid",     Text.Type },
-				{ "dynamic",  Text.Type }
-				}),
-				DataTable = Source[tables]{0},
-				Columns = Table.FromRecords(DataTable[columns]),
-				ColumnsWithType = Table.Join(Columns, {"type"}, TypeMap , {"AnalyticsTypes"}),
-				Rows = Table.FromRows(DataTable[rows], Columns[name]), 
-				Table = Table.TransformColumnTypes(Rows, Table.ToList(ColumnsWithType, (c) => { c{0}, c{3}}))
-				in
-				Table
-				in
-				    AnalyticsQuery
+				let
+				RangeStartTime = DateTime.ToText(RangeStart,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+				RangeEndTime = DateTime.ToText(RangeEnd,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+				Source = AzureDataExplorer.Contents(
+					#"Azure Log Analytics Path"
+					, #"Azure Log Analytics Workspace Name"
+					,"
+					set notruncation;
+					set ClientRequestIdPrefix='BYOLA Progress Report';
+					let RangeStartTime = todatetime('" & RangeStartTime & "');
+					let RangeEndTime = todatetime('" & RangeEndTime & "');
+					let dbid = '"& _ArtifactId &"';
+					let wkspid = '"& _WorkspaceId &"';
+					let window = PowerBIDatasetsWorkspace
+						| extend TimeGenerated=TimeGenerated+"& Number.ToText(#"UTC Offset Hours") &"h
+						| where TimeGenerated >=RangeStartTime and TimeGenerated <RangeEndTime
+						| where XmlaRequestId != '00000000-0000-0000-0000-000000000000'
+						| where ArtifactId has dbid and PowerBIWorkspaceId has wkspid
+						| where LogAnalyticsCategory =='Progress Report'
+						| where OperationDetailName in ('ReadData', 'ExecuteSql', 'CompressSegment', 'TabularRefresh')
+						| where not(OperationName =='ProgressReportError' and OperationDetailName =='TabularRefresh' and EventText !has 'Internal Error Code')
+						| extend ObjectName = tostring( split(XmlaObjectPath,'.').[3])
+						| project 
+							endTime=TimeGenerated
+							, XmlaRequestId
+							, CorrelationId
+							, OperationDetailName
+							, DurationMs
+							, CpuTimeMs
+							, ObjectCount=ProgressCounter
+							, Status
+							, StatusCode
+							, XmlaObjectPath
+							, ObjectName
+							, EventText
+							, ObjectType = case(OperationDetailName in ('ReadData', 'ExecuteSql', 'CompressSegment'), 'Partition'
+							, EventText contains ' parti' or EventText contains 'osion' or EventText contains 'partycji' or EventText contains 'skaidinio' or EventText contains 'дяла' or EventText contains 'διαμερίσματος' or EventText contains 'nodalījuma' or EventText contains 'oddílu' or EventText contains 'bölümünün' or EventText contains 'พาร์ติชั' or EventText contains '分区' or EventText contains 'パーティション' or EventText contains '파티션', 'Partition'
+							, EventText contains ' hiera' or EventText contains 'jerar' or EventText contains 'rarchi' or EventText contains 'erarh' or EventText contains 'ιεραρχίας' or EventText contains 'ерарх' or EventText contains 'hiyerarşisinin' or EventText contains 'ลำดับชั้น' or EventText contains '层次' or EventText contains '階層' or EventText contains '계층 구조', 'Hierarchy'
+							, EventText contains ' calc' or EventText contains 'beräknade' or EventText contains 'berechneten' or EventText contains 'beregne' or EventText contains 'počítaného' or EventText contains 'berekende' or EventText contains 'lasketun' or EventText contains 'izračun' or EventText contains 'apskaičiuotojo' or EventText contains 'obliczeniowej' or EventText contains 'числяе' or EventText contains 'υπολογισμένης' or EventText contains 'aprēķinātās' or EventText contains 'hesaplanmış' or EventText contains 'ารคำน' or EventText contains '算' or EventText contains '계산', 'Calculated column'
+							, XmlaObjectPath has 'CalculatedTable', 'Calculated Table'
+							, XmlaObjectPath has 'CalculationGroup', 'Calculation Group'
+							, OperationDetailName =='TabularRefresh' and split(XmlaObjectPath,'.').[3]=='', 'Relationship', '')
+						| extend
+							TableName=iif(ObjectType != 'Relationship', split(XmlaObjectPath,'.').[2],'')
+							, PartitionName=iif(ObjectType == 'Partition', split(XmlaObjectPath,'.').[3],'')
+						| extend startTime=datetime_add('millisecond', -DurationMs, endTime)
+						| parse EventText with * '[MashupCPUTime: ' MashupCPUTime:long ' ms, MashupPeakMemory: '  MashupPeakMemory:long ' KB]'
+						| parse EventText with * 'Internal Error Code: \'' ErrorHex '\'' *
+						| extend TableTMID = extract(""TableTMID='([0-9]+)'"", 1, EventText), PartitionTMID = extract(""PartitionTMID='([0-9]+)'"", 1, EventText)
+						;
+					let TMID =
+						window
+						| where EventText has 'TableTMID='
+						| summarize arg_min(startTime, TableTMID, PartitionTMID) by CorrelationId
+						;
+					let DataRefresh =
+						window
+						| where OperationDetailName != 'CompressSegment'// in ('TabularRefresh')
+						| summarize
+							startTime=iif(isempty(min(startTime)),min(endTime), min(startTime))
+							, endTime=arg_max(endTime, ObjectName, CorrelationId, MashupCPUTime, MashupPeakMemory)
+							, DurationMs=sum(DurationMs)
+							, CpuTimeMs=sum(CpuTimeMs)
+							, ObjectCount=max(ObjectCount)
+							, TmObjCount=dcount(XmlaObjectPath)
+							, Status=max(Status)
+							, StatusCode = min_of(min(StatusCode), toint(min(ErrorHex)))
+							by TableName, PartitionName, XmlaRequestId, OperationDetailName, ObjectType
+						| extend 
+							ObjectCount=iff(ObjectType =='Partition', ObjectCount, TmObjCount)
+							, ErrorTimeMs=iif(StatusCode <0, datetime_part('millisecond',endTime), toint(''))
+						| join kind=leftouter TMID on CorrelationId
+						| project-away TmObjCount, CorrelationId1, startTime1
+						;
+					let PartitionColumn =
+						window
+						| where OperationDetailName == 'CompressSegment'
+						| parse EventText with * '<ccon>' columnName '</ccon>' *
+						| summarize 
+							arg_min(startTime, ObjectType, OperationDetailName)
+							, endTime=max(endTime), DurationMs=sum(DurationMs)
+							, CpuTimeMs=sum(CpuTimeMs)
+							, ObjectCount=dcount(columnName)
+							, Status=min(Status)
+							, StatusCode = min(StatusCode)
+							by TableName, PartitionName, XmlaRequestId, TableTMID, PartitionTMID
+						;
+					DataRefresh
+					| union PartitionColumn
+					"
+					,[MaxRows=null, MaxSize=null, NoTruncate=true, AdditionalSetStatements=null]
+				)
+				in Source	
 				```
 
 	annotation PBI_ResultType = Table
+
+	annotation PBI-IsMQueryFoldable = True
 

@@ -62,16 +62,29 @@
         },
         {
           "location": {
-            "x": 45.77164058483595,
-            "y": 466.12995555289314
+            "x": 32.691463260647609,
+            "y": 468.50816961183642
           },
           "nodeIndex": "EventText",
           "nodeLineageTag": "339f4188-8b84-4ecb-9882-43867f3a2924",
           "size": {
-            "height": 193.83660544207498,
+            "height": 145,
             "width": 234
           },
-          "zIndex": 1
+          "zIndex": 6
+        },
+        {
+          "location": {
+            "x": 29.124142172232624,
+            "y": 629.03761859051133
+          },
+          "nodeIndex": "ErrorText",
+          "nodeLineageTag": "fdc17eb4-17de-4173-9a2e-afa85376212a",
+          "size": {
+            "height": 145,
+            "width": 234
+          },
+          "zIndex": 7
         }
       ],
       "name": "All tables",

@@ -1,0 +1,124 @@
+table ErrorText
+	lineageTag: fdc17eb4-17de-4173-9a2e-afa85376212a
+
+	refreshPolicy
+		policyType: basic
+		rollingWindowGranularity: month
+		rollingWindowPeriods: 2
+		incrementalGranularity: day
+		incrementalPeriods: 2
+		incrementalPeriodsOffset: -1
+		sourceExpression =
+			let
+			RangeStartTime = DateTime.ToText(RangeStart,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+			RangeEndTime = DateTime.ToText(RangeEnd,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+			Source = AzureDataExplorer.Contents(
+				#"Azure Log Analytics Path"
+				, #"Azure Log Analytics Workspace Name"
+				,"
+				set notruncation;
+				set ClientRequestIdPrefix='BYOLA ExecutionMetrics';
+				let RangeStartTime = todatetime('" & RangeStartTime & "');
+				let RangeEndTime = todatetime('" & RangeEndTime & "');
+				let dbid = '"& _ArtifactId &"';
+				let wkspid = '"& _WorkspaceId &"';
+				let window =
+					PowerBIDatasetsWorkspace
+					| extend TimeGenerated=TimeGenerated+"& Number.ToText(#"UTC Offset Hours") &"h
+					| where TimeGenerated >=RangeStartTime and TimeGenerated <RangeEndTime
+					| where XmlaRequestId != '00000000-0000-0000-0000-000000000000'
+					;
+				let ExecutionMetrics =
+					window
+					| where LogAnalyticsCategory  == 'Execution Metrics'
+					| project XmlaRequestId, CorrelationId
+					;
+				let semanticmodel=
+					materialize(
+						window | where ArtifactId != ''
+						| summarize arg_max(TimeGenerated, ArtifactId, ArtifactName, PowerBIWorkspaceId, PowerBIWorkspaceName, PremiumCapacityId) by XmlaRequestId
+						| where PowerBIWorkspaceId has wkspid and ArtifactId has dbid
+					)
+					;
+				window
+				| where OperationDetailName == 'Error'
+				| join kind=inner semanticmodel on XmlaRequestId
+				| join kind=leftsemi ExecutionMetrics on XmlaRequestId and CorrelationId // there are errors not linked to CorrelationId, not clear if these should be considered
+				| summarize ErrorMessage = max(EventText) by XmlaRequestId
+				| extend ErrorTextHash=hash_md5(ErrorMessage) //  Hash is redundant
+				| project XmlaRequestId, ErrorMessage //, ErrorTextHash
+				"
+				,[MaxRows=null, MaxSize=null, NoTruncate=true, AdditionalSetStatements=null]
+			)
+			in Source
+
+	column XmlaRequestId
+		dataType: string
+		isHidden
+		lineageTag: 7f692490-f6c5-48b4-b979-ccac844cb8ff
+		summarizeBy: none
+		sourceColumn: XmlaRequestId
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column ErrorMessage
+		dataType: string
+		lineageTag: 1a75478b-db66-41ce-acca-d0cbeb8ba6b0
+		summarizeBy: none
+		sourceColumn: EventText
+
+		annotation SummarizationSetBy = Automatic
+
+	partition EventText = m
+		mode: import
+		queryGroup: 'Log Analytics'
+		source =
+				let
+				RangeStartTime = DateTime.ToText(RangeStart,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+				RangeEndTime = DateTime.ToText(RangeEnd,[Format="yyyy-MM-dd'T'HH:mm:ss'Z'", Culture="en-US"]),
+				Source = AzureDataExplorer.Contents(
+					#"Azure Log Analytics Path"
+					, #"Azure Log Analytics Workspace Name"
+					,"
+					set notruncation;
+					set ClientRequestIdPrefix='BYOLA ExecutionMetrics';
+					let RangeStartTime = todatetime('" & RangeStartTime & "');
+					let RangeEndTime = todatetime('" & RangeEndTime & "');
+					let dbid = '"& _ArtifactId &"';
+					let wkspid = '"& _WorkspaceId &"';
+					let window =
+						PowerBIDatasetsWorkspace
+						| extend TimeGenerated=TimeGenerated+"& Number.ToText(#"UTC Offset Hours") &"h
+						| where TimeGenerated >=RangeStartTime and TimeGenerated <RangeEndTime
+						| where XmlaRequestId != '00000000-0000-0000-0000-000000000000'
+						;
+					let ExecutionMetrics =
+						window
+						| where LogAnalyticsCategory  == 'Execution Metrics'
+						| project XmlaRequestId, CorrelationId
+						;
+					let semanticmodel=
+						materialize(
+							window | where ArtifactId != ''
+							| summarize arg_max(TimeGenerated, ArtifactId, ArtifactName, PowerBIWorkspaceId, PowerBIWorkspaceName, PremiumCapacityId) by XmlaRequestId
+							| where PowerBIWorkspaceId has wkspid and ArtifactId has dbid
+						)
+						;
+					window
+					| where OperationDetailName == 'Error'
+					| join kind=inner semanticmodel on XmlaRequestId
+					| join kind=leftsemi ExecutionMetrics on XmlaRequestId and CorrelationId // there are errors not linked to CorrelationId, not clear if these should be considered
+					| summarize ErrorMessage = max(EventText) by XmlaRequestId
+					| extend ErrorTextHash=hash_md5(ErrorMessage) //  Hash is redundant
+					| project XmlaRequestId, ErrorMessage //, ErrorTextHash
+					"
+					,[MaxRows=null, MaxSize=null, NoTruncate=true, AdditionalSetStatements=null]
+				)
+				in Source
+
+	annotation PBI_ResultType = Table
+
+	annotation PBI-IsMQueryFoldable = True
+

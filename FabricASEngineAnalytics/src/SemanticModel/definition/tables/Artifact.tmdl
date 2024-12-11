@@ -10,53 +10,43 @@ table Artifact
 		lineageTag: 6899af80-8cfa-4f86-8b63-9b703cfab015
 
 	column WorkspaceId
-		dataType: string
 		lineageTag: 1755b383-416f-41d0-84a4-479d4677f867
 		summarizeBy: none
 		isNameInferred
-		isDataTypeInferred
 		sourceColumn: [WorkspaceId]
 
 		annotation SummarizationSetBy = Automatic
 
 	column ArtifactId
-		dataType: string
 		lineageTag: 5143c2a4-083f-47d5-a254-2941e34f6f05
 		summarizeBy: none
 		isNameInferred
-		isDataTypeInferred
 		sourceColumn: ExecutionMetrics[ArtifactId]
 
 		annotation SummarizationSetBy = Automatic
 
 	column ArtifactName
-		dataType: string
 		lineageTag: 3d4aed30-a61e-4b57-bed0-c2041c0aaaef
 		summarizeBy: none
 		isNameInferred
-		isDataTypeInferred
 		sourceColumn: [ArtifactName]
 
 		annotation SummarizationSetBy = Automatic
 
 	column WorkspaceName
-		dataType: string
 		lineageTag: 9c5af338-e7f3-4352-a54d-077fc58eca22
 		summarizeBy: none
 		isNameInferred
-		isDataTypeInferred
 		sourceColumn: [WorkspaceName]
 
 		annotation SummarizationSetBy = Automatic
 
 	column ArtifactURL
-		dataType: string
 		isHidden
 		lineageTag: c7741217-d774-4b45-a728-d1852ba49418
 		dataCategory: WebUrl
 		summarizeBy: none
 		isNameInferred
-		isDataTypeInferred
 		sourceColumn: [ArtifactURL]
 
 		annotation SummarizationSetBy = Automatic

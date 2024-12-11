@@ -6,19 +6,36 @@ model Model
 		legacyRedirects
 		returnErrorValuesAsNull
 
-annotation PBIDesktopVersion = 2.129.702.0 (24.05)
+queryGroup 'Log Analytics Parameters'
 
-annotation PBI_QueryOrder = ["Azure Log Analytics Workspace Id","Days Ago To Start","Days Ago To Finish","UTC Offset Hours","Fabric Workspace Id","Fabric Item Id","ExecutionMetrics","Progress Report","EventText","Calendar","_ArtifactId","_WorkspaceId"]
+	annotation PBI_QueryGroupOrder = 0
+
+queryGroup 'Incremental Refresh Parameters'
+
+	annotation PBI_QueryGroupOrder = 1
+
+queryGroup Calendar
+
+	annotation PBI_QueryGroupOrder = 2
+
+queryGroup 'Log Analytics'
+
+	annotation PBI_QueryGroupOrder = 3
+
+annotation PBIDesktopVersion = 2.138.1452.0 (24.11)
+
+annotation PBI_QueryOrder = ["_ArtifactId","_WorkspaceId","UTC Offset Hours","Fabric Workspace Id","Fabric Item Id","Execution Metrics","RangeStart","RangeEnd","Progress Report","EventText","Days in DateTime Table","DateTimes","ErrorText","Azure Log Analytics Subscription Id","Azure Log Analytics ResourceGroup Name","Azure Log Analytics Workspace Name","Azure Log Analytics Path"]
 
 annotation __PBI_TimeIntelligenceEnabled = 0
 
-annotation PBI_ProTooling = ["DevMode"]
+annotation PBI_ProTooling = ["DevMode","TMDL-Extension"]
 
 ref table 'Progress Report'
 ref table Calendar
 ref table Artifact
 ref table ExecutionMetrics
 ref table EventText
+ref table ErrorText
 
 ref cultureInfo en-US
 

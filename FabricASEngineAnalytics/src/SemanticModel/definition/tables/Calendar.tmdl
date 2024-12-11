@@ -13,37 +13,29 @@ table Calendar
 		annotation SummarizationSetBy = Automatic
 
 	column YYYYMMDD = FORMAT('Calendar'[DateTime],"YYYYMMDD")
-		dataType: string
 		lineageTag: 40ff3e19-e080-4515-a65a-475b54e88249
 		summarizeBy: none
-		isDataTypeInferred
 
 		annotation SummarizationSetBy = Automatic
 
 	column Hour = HOUR('Calendar'[DateTime])
-		dataType: int64
 		formatString: 0
 		lineageTag: 850839be-2b51-40df-ad03-cacdc60a939d
 		summarizeBy: none
-		isDataTypeInferred
 
 		annotation SummarizationSetBy = Automatic
 
 	column Minute = MINUTE('Calendar'[DateTime])
-		dataType: int64
 		formatString: 0
 		lineageTag: 6dd2acdf-4895-4fe6-ae54-5f6d875748b5
 		summarizeBy: none
-		isDataTypeInferred
 
 		annotation SummarizationSetBy = Automatic
 
 	column Date = DATE(YEAR('Calendar'[DateTime]),MONTH('Calendar'[DateTime]), DAY('Calendar'[DateTime]))
-		dataType: dateTime
 		formatString: yyyy-mm-dd
 		lineageTag: b8df77be-42c3-4432-bf21-312c1dfcf038
 		summarizeBy: none
-		isDataTypeInferred
 
 		changedProperty = FormatString
 
@@ -52,11 +44,9 @@ table Calendar
 		annotation PBI_FormatHint = {"isDateTimeCustom":true}
 
 	column DateTime(Hour) = 'Calendar'[Date]+'Calendar'[Hour]/24
-		dataType: dateTime
 		formatString: yyyy-mm-dd hh:nn
 		lineageTag: ee0e21fd-7ee4-46d3-8e87-2912b726805d
 		summarizeBy: none
-		isDataTypeInferred
 
 		changedProperty = FormatString
 
@@ -65,11 +55,9 @@ table Calendar
 		annotation PBI_FormatHint = {"isDateTimeCustom":true}
 
 	column DateTime(15m) = 'Calendar'[Date]+ TIME('Calendar'[Hour],15*ROUNDDOWN('Calendar'[Minute]/15,0),0)
-		dataType: dateTime
 		formatString: yyyy-mm-dd hh:nn
 		lineageTag: 56f8dd1f-23fa-4a89-b297-91a8cbe12934
 		summarizeBy: none
-		isDataTypeInferred
 
 		annotation SummarizationSetBy = Automatic
 
@@ -77,23 +65,15 @@ table Calendar
 
 	partition Calendar-8d890e69-fd08-4de2-ad3b-8a3d1e0019e7 = m
 		mode: import
+		queryGroup: Calendar
 		source =
 				let
-				    Start = Date.StartOfDay(Date.AddDays(DateTimeZone.UtcNow(), -#"Days Ago To Start")),
-				    End = Date.EndOfDay(Date.AddDays(Date.AddDays(DateTimeZone.UtcNow(), -#"Days Ago To Finish"),1)),
-				    Count = (2+Number.From(End-Start))*2880,
-				    Calendar = Table.FromColumns({List.DateTimes(DateTime.From(Date.AddDays(Start,-1)),Count,#duration(0,0,0,30))}, type table[DateTime=datetime])
+				    Start = Date.StartOfDay(Date.AddDays(DateTimeZone.UtcNow(), -#"Days in Calendar Table")),
+				    End = Date.EndOfDay(DateTimeZone.UtcNow()),
+				    Count = (Number.From(End-Start))*2880,
+				    Calendar = Table.FromColumns({List.DateTimes(DateTime.From(Start), Count, #duration(0,0,0,30))}, type table[DateTime=datetime])
 				in
 				    Calendar
-				
-				// let
-				//     Start = RangeStart,
-				//     End = Date.AddDays(RangeEnd,1),
-				//     Count = (2+Number.From(End-Start))*2880,
-				//     Calendar = Table.FromColumns({List.DateTimes(DateTime.From(Date.AddDays(Start,-1)),Count,#duration(0,0,0,30))}, type table[DateTime=datetime]),
-				//     #"Filtered Rows" = Table.SelectRows(Calendar, each [DateTime] >= RangeStart and [DateTime] < RangeEnd)
-				// in
-				//     #"Filtered Rows"
 
 	annotation PBI_ResultType = Table
 
